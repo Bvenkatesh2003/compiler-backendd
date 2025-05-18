@@ -1,36 +1,39 @@
-from fastapi import FastAPI
+# main.py
+from fastapi import FastAPI, Request
 from pydantic import BaseModel
-import subprocess
+import docker
 import uuid
 import os
 
 app = FastAPI()
+client = docker.from_env()
 
 class CodeRequest(BaseModel):
     code: str
 
 @app.post("/run")
-def run_code(request: CodeRequest):
-    temp_filename = f"/tmp/code_{uuid.uuid4().hex}.py"
-    with open(temp_filename, "w") as f:
-        f.write(request.code)
+async def run_code(req: CodeRequest):
+    filename = f"/tmp/{uuid.uuid4().hex}.py"
+    with open(filename, "w") as f:
+        f.write(req.code)
 
     try:
-        result = subprocess.run(
-            [
-                "docker", "run", "--rm",
-                "-i", "-v", f"{temp_filename}:/code.py",
-                "python-runner-image"
-            ],
-            input=open(temp_filename, "rb").read(),
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            timeout=5
+        container = client.containers.run(
+            image="python:3.10-slim",
+            command=f"python {os.path.basename(filename)}",
+            volumes={"/tmp": {"bind": "/app", "mode": "ro"}},
+            working_dir="/app",
+            stdin_open=True,
+            stdout=True,
+            stderr=True,
+            remove=True,
+            mem_limit="100m",
+            network_disabled=True
         )
-        os.remove(temp_filename)
-        return {
-            "stdout": result.stdout.decode(),
-            "stderr": result.stderr.decode()
-        }
-    except subprocess.TimeoutExpired:
-        return {"error": "Execution timed out."}
+
+        return {"output": container.decode("utf-8")}
+
+    except docker.errors.ContainerError as e:
+        return {"output": e.stderr.decode("utf-8") if e.stderr else str(e)}
+    finally:
+        os.remove(filename)
